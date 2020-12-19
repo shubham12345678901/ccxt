@@ -14,6 +14,7 @@ const log       = require ('ololog')
 module.exports = async (exchange) => {
 
     const skippedExchanges = [
+        'bitforex',
     ]
 
     if (skippedExchanges.includes (exchange.id)) {
@@ -27,7 +28,7 @@ module.exports = async (exchange) => {
 
         const method = 'fetchMarkets'
         const markets = await exchange[method] ()
-        Object.values (markets).forEach (market => testMarket (exchange, market, method))
+        Object.values (markets).forEach ((market) => testMarket (exchange, market, method))
         return markets
 
     } else {

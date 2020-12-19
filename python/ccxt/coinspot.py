@@ -10,7 +10,7 @@ from ccxt.base.errors import AuthenticationError
 from ccxt.base.errors import NotSupported
 
 
-class coinspot (Exchange):
+class coinspot(Exchange):
 
     def describe(self):
         return self.deep_extend(super(coinspot, self).describe(), {
@@ -19,8 +19,14 @@ class coinspot (Exchange):
             'countries': ['AU'],  # Australia
             'rateLimit': 1000,
             'has': {
+                'cancelOrder': False,
                 'CORS': False,
                 'createMarketOrder': False,
+                'createOrder': True,
+                'fetchBalance': True,
+                'fetchOrderBook': True,
+                'fetchTicker': True,
+                'fetchTrades': True,
             },
             'urls': {
                 'logo': 'https://user-images.githubusercontent.com/1294454/28208429-3cacdf9a-6896-11e7-854e-4c79a772a30f.jpg',
@@ -30,6 +36,7 @@ class coinspot (Exchange):
                 },
                 'www': 'https://www.coinspot.com.au',
                 'doc': 'https://www.coinspot.com.au/api',
+                'referral': 'https://www.coinspot.com.au/register?code=PJURCU',
             },
             'api': {
                 'public': {
@@ -51,43 +58,55 @@ class coinspot (Exchange):
                         'my/sell',
                         'my/buy/cancel',
                         'my/sell/cancel',
+                        'ro/my/balances',
+                        'ro/my/balances/{cointype}',
+                        'ro/my/deposits',
+                        'ro/my/withdrawals',
+                        'ro/my/transactions',
+                        'ro/my/transactions/{cointype}',
+                        'ro/my/transactions/open',
+                        'ro/my/transactions/{cointype}/open',
+                        'ro/my/sendreceive',
+                        'ro/my/affiliatepayments',
+                        'ro/my/referralpayments',
                     ],
                 },
             },
             'markets': {
-                'BTC/AUD': {'id': 'BTC', 'symbol': 'BTC/AUD', 'base': 'BTC', 'quote': 'AUD'},
-                'LTC/AUD': {'id': 'LTC', 'symbol': 'LTC/AUD', 'base': 'LTC', 'quote': 'AUD'},
-                'DOGE/AUD': {'id': 'DOGE', 'symbol': 'DOGE/AUD', 'base': 'DOGE', 'quote': 'AUD'},
+                'BTC/AUD': {'id': 'btc', 'symbol': 'BTC/AUD', 'base': 'BTC', 'quote': 'AUD', 'baseId': 'btc', 'quoteId': 'aud'},
+                'LTC/AUD': {'id': 'ltc', 'symbol': 'LTC/AUD', 'base': 'LTC', 'quote': 'AUD', 'baseId': 'ltc', 'quoteId': 'aud'},
+                'DOGE/AUD': {'id': 'doge', 'symbol': 'DOGE/AUD', 'base': 'DOGE', 'quote': 'AUD', 'baseId': 'doge', 'quoteId': 'aud'},
+            },
+            'commonCurrencies': {
+                'DRK': 'DASH',
             },
         })
 
     def fetch_balance(self, params={}):
-        response = self.privatePostMyBalances()
+        self.load_markets()
+        response = self.privatePostMyBalances(params)
         result = {'info': response}
-        if 'balance' in response:
-            balances = response['balance']
-            currencies = list(balances.keys())
-            for c in range(0, len(currencies)):
-                currency = currencies[c]
-                uppercase = currency.upper()
-                account = {
-                    'free': balances[currency],
-                    'used': 0.0,
-                    'total': balances[currency],
-                }
-                if uppercase == 'DRK':
-                    uppercase = 'DASH'
-                result[uppercase] = account
+        balances = self.safe_value(response, 'balance', {})
+        currencyIds = list(balances.keys())
+        for i in range(0, len(currencyIds)):
+            currencyId = currencyIds[i]
+            code = self.safe_currency_code(currencyId)
+            account = self.account()
+            account['total'] = self.safe_float(balances, currencyId)
+            result[code] = account
         return self.parse_balance(result)
 
     def fetch_order_book(self, symbol, limit=None, params={}):
+        self.load_markets()
         market = self.market(symbol)
-        orderbook = self.privatePostOrders(self.extend({
+        request = {
             'cointype': market['id'],
-        }, params))
+        }
+        orderbook = self.privatePostOrders(self.extend(request, params))
         return self.parse_order_book(orderbook, None, 'buyorders', 'sellorders', 'rate', 'amount')
 
     def fetch_ticker(self, symbol, params={}):
+        self.load_markets()
         response = self.publicGetLatest(params)
         id = self.market_id(symbol)
         id = id.lower()
@@ -118,20 +137,71 @@ class coinspot (Exchange):
         }
 
     def fetch_trades(self, symbol, since=None, limit=None, params={}):
-        return self.privatePostOrdersHistory(self.extend({
-            'cointype': self.market_id(symbol),
-        }, params))
+        self.load_markets()
+        market = self.market(symbol)
+        request = {
+            'cointype': market['id'],
+        }
+        response = self.privatePostOrdersHistory(self.extend(request, params))
+        #
+        #     {
+        #         "status":"ok",
+        #         "orders":[
+        #             {"amount":0.00102091,"rate":21549.09999991,"total":21.99969168,"coin":"BTC","solddate":1604890646143,"market":"BTC/AUD"},
+        #         ],
+        #     }
+        #
+        trades = self.safe_value(response, 'orders', [])
+        return self.parse_trades(trades, market, since, limit)
+
+    def parse_trade(self, trade, market=None):
+        #
+        # public fetchTrades
+        #
+        #     {
+        #         "amount":0.00102091,
+        #         "rate":21549.09999991,
+        #         "total":21.99969168,
+        #         "coin":"BTC",
+        #         "solddate":1604890646143,
+        #         "market":"BTC/AUD"
+        #     }
+        #
+        price = self.safe_float(trade, 'rate')
+        amount = self.safe_float(trade, 'amount')
+        cost = self.safe_float(trade, 'total')
+        if (cost is None) and (price is not None) and (amount is not None):
+            cost = price * amount
+        timestamp = self.safe_integer(trade, 'solddate')
+        marketId = self.safe_string(trade, 'market')
+        symbol = self.safe_symbol(marketId, market, '/')
+        return {
+            'info': trade,
+            'id': None,
+            'symbol': symbol,
+            'timestamp': timestamp,
+            'datetime': self.iso8601(timestamp),
+            'order': None,
+            'type': None,
+            'side': None,
+            'takerOrMaker': None,
+            'price': price,
+            'amount': amount,
+            'cost': cost,
+            'fee': None,
+        }
 
     def create_order(self, symbol, type, side, amount, price=None, params={}):
+        self.load_markets()
         method = 'privatePostMy' + self.capitalize(side)
         if type == 'market':
             raise ExchangeError(self.id + ' allows limit orders only')
-        order = {
+        request = {
             'cointype': self.market_id(symbol),
             'amount': amount,
             'rate': price,
         }
-        return getattr(self, method)(self.extend(order, params))
+        return getattr(self, method)(self.extend(request, params))
 
     def cancel_order(self, id, symbol=None, params={}):
         raise NotSupported(self.id + ' cancelOrder() is not fully implemented yet')
